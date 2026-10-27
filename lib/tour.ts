@@ -84,10 +84,10 @@ export const TOUR: TourStop[] = [
     id: "hall",
     kicker: "Stop 8 · Across the lane",
     name: "University of Gold Coast Hall",
-    blurb: "Directly across the lane from the Main Campus, facing it, stands the Gold Coast Hall: a separate conference hall in the same white circle-cut cladding. UGC's 2025 graduation, with more than 650 graduates, was held here.",
+    blurb: "Across the lane from the Main Campus, with its entrance facing the main gate, stands the Gold Coast Hall: a separate conference hall in the same white circle-cut cladding. UGC's 2025 graduation, with more than 650 graduates, was held here.",
     facts: ["Ground floor foyer", "Large auditorium with chandelier", "Gallery above · staff offices on the top floor"],
-    target: [40, 7, 18],
-    cam: [-14, 18, 6],
+    target: [30, 7, 21],
+    cam: [-2, 22, 12],
   },
   {
     id: "hall-aud",

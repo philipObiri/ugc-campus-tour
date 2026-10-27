@@ -13,11 +13,25 @@ export type RoomKind =
 export type Room = { name: string; kind: RoomKind; band: "a" | "b" | "full"; share: number; note?: string };
 export type Floor = { name: string; short: string; rooms: Room[]; voidBelow?: boolean };
 
+/** Which way a building's entrance and sign face. */
+export type Face = "south" | "north" | "west" | "east";
+
+/** An entrance; `sign` puts the building's name in bold above it, near the top of the facade. */
+export type Entrance = { face: Face; near?: XZ; sign?: boolean };
+
 export type CladSpec = {
   id: number;
   key: "main" | "hall";
   /** Which way the entrance and sign face. */
-  face: "south" | "north";
+  face: Face;
+  /** Side with the black vertical-bar palisade fence behind the building. */
+  rear: Face;
+  /** Put the entrance on the front-facing wall section nearest this point (default: the longest one). */
+  frontNear?: XZ;
+  /** Further entrances (each gets its own doorway and canopy; the sign stays on the main one). */
+  extraEntrances?: Entrance[];
+  /** "middle": centre the main sign across the whole front facade at mid-height (default: over the entrance). */
+  signAt?: "middle" | "entrance";
   title: string;
   sign: "hall" | "main";
   floors: Floor[];
@@ -43,6 +57,8 @@ export const CLAD: CladSpec[] = [
     id: MAIN_ID,
     key: "main",
     face: "south",
+    rear: "north",
+    signAt: "middle", // the UGC logo sits in the middle of the Main Campus facade
     title: "UGC Main Campus",
     sign: "main",
     floors: [
@@ -85,7 +101,10 @@ export const CLAD: CladSpec[] = [
   {
     id: HALL_ID,
     key: "hall",
-    face: "north",
+    face: "north", // main entrance on the lane, facing the Main Campus
+    rear: "south",
+    // second entrance at the north end of the west face, toward the gate (per a UGC student)
+    extraEntrances: [{ face: "west", near: [18, 9], sign: true }],
     title: "University of Gold Coast Hall",
     sign: "hall",
     floors: [
@@ -124,6 +143,10 @@ export const CLAD: CladSpec[] = [
 ];
 
 export const cladById = new Map(CLAD.map((c) => [c.id, c]));
+
+/** All entrances of a clad building, the main (signed) one first. */
+export const entrancesOf = (spec: CladSpec | undefined): Entrance[] =>
+  spec ? [{ face: spec.face, near: spec.frontNear }, ...(spec.extraEntrances ?? [])] : [];
 
 // ---------- forecourt structures (positions in local metres; x = east, z = south) ----------
 export type SmallBuilding = { id: string; name: string; pts: XZ[]; height: number; wall: string; trim: string; roof: string; door: [XZ, XZ]; note: string };

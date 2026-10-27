@@ -6,11 +6,11 @@ import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { labelRoot } from "@/lib/labelRoot";
 import {
-  CAFETERIA, COMPOUND_WALLS, FLOOR_H, GATE, GROUND_H, STUDENT_SERVICES, TEMPLE_PATH, floorBase, floorTop,
+  CAFETERIA, COMPOUND_WALLS, FLOOR_H, GATE, GROUND_H, STUDENT_SERVICES, TEMPLE_PATH, entrancesOf, floorBase, floorTop,
   type CladSpec, type Floor, type Room, type SmallBuilding,
 } from "@/lib/campus";
 import {
-  ENTRANCE_W, exteriorSegments, floorRooms, frameOf, frontEdge, insideFrame, interiorWalls, layoutFloor, liftLocal,
+  ENTRANCE_W, exteriorSegments, rearFence, floorRooms, frameOf, frontEdge, insideFrame, interiorWalls, layoutFloor, liftLocal,
   toWorld, type Frame, type Rect,
 } from "@/lib/interiorLayout";
 import { GeoBuilder, WALLED_PLOT, addFlatCap, addPitchedRoof, addRibbon, obb, pointInPoly, seeded, type Spec, type XZ } from "@/lib/laneGeometry";
@@ -468,10 +468,11 @@ export function CladBuilding({ info, spec, mode, highlight, onPick, hideLabel = 
   info: BuildingInfo; spec: CladSpec; mode: ViewMode; highlight: boolean; onPick: () => void; hideLabel?: boolean;
 }) {
   const { b } = info;
+  const b0 = b;
   const levels = spec.floors.length;
   const fullH = floorBase(levels);
   const tex = useMemo(() => ({ perf: perforatedTexture(), glass: glassTexture(), sign: signTexture(spec.sign) }), [spec.sign]);
-  const fe = useMemo(() => frontEdge(b.pts, spec.face), [b.pts, spec.face]);
+  const fe = useMemo(() => frontEdge(b.pts, spec.face, spec.frontNear), [b.pts, spec.face, spec.frontNear]);
 
   const parts = useMemo(() => {
     const top = mode.type === "cut" ? floorBase(mode.floor) + 1.2 : fullH + 0.9;
@@ -480,10 +481,10 @@ export function CladBuilding({ info, spec, mode, highlight, onPick, hideLabel = 
     const slab = new GeoBuilder();
     const white = C("#ffffff");
     // ground floor: glazed, with the entrance opening on the front edge
-    segWalls(glass, exteriorSegments(b.pts, true, spec.face), b.pts, 0, Math.min(GROUND_H, top), white, 2.5, GROUND_H);
+    segWalls(glass, exteriorSegments(b.pts, entrancesOf(spec)), b.pts, 0, Math.min(GROUND_H, top), white, 2.5, GROUND_H);
     // above the entrance, a lintel band of cladding
-    if (top > GROUND_H) segWalls(panels, exteriorSegments(b.pts, false), b.pts, GROUND_H, top, white, 3.2, 3.2, GROUND_H);
-    segWalls(slab, exteriorSegments(b.pts, false), b.pts, GROUND_H - 0.3, GROUND_H + 0.05, C("#d4d7d9"), 3, 3);
+    if (top > GROUND_H) segWalls(panels, exteriorSegments(b.pts), b.pts, GROUND_H, top, white, 3.2, 3.2, GROUND_H);
+    segWalls(slab, exteriorSegments(b.pts), b.pts, GROUND_H - 0.3, GROUND_H + 0.05, C("#d4d7d9"), 3, 3);
     if (mode.type === "full") addFlatCap(slab, b.pts, fullH, C("#a9a59c"), 0);
     if (mode.type !== "full") {
       const fl = mode.floor;
@@ -497,11 +498,77 @@ export function CladBuilding({ info, spec, mode, highlight, onPick, hideLabel = 
     return { glass: glass.build(), panels: panels.build(), slab: slab.build() };
   }, [b.pts, mode, fullH, spec.floors, spec.face]);
 
-  const mx = (fe.a[0] + fe.b[0]) / 2 + fe.nx * 0.3;
-  const mz = (fe.a[1] + fe.b[1]) / 2 + fe.nz * 0.3;
-  const yaw = Math.atan2(fe.nx, fe.nz);
-  const signW = Math.min(fe.len * 0.85, spec.sign === "main" ? 14 : 15);
+  // black vertical-bar palisade behind the building
+  const fence = useMemo(() => {
+    const gb = new GeoBuilder();
+    for (const [a, b] of rearFence(b0.pts, spec.rear)) {
+      const len = Math.hypot(b[1] - a[1], b[0] - a[0]);
+      const ux = (b[0] - a[0]) / len;
+      const uz = (b[1] - a[1]) / len;
+      for (let d = 0; d <= len; d += 0.14) {
+        const x = a[0] + ux * d;
+        const z = a[1] + uz * d;
+        segBox(gb, [x - ux * 0.02, z - uz * 0.02], [x + ux * 0.02, z + uz * 0.02], 0, 2.4, 0.04, "#0d0d0d");
+      }
+      for (let d = 0; d <= len; d += 2.6) {
+        const x = a[0] + ux * d;
+        const z = a[1] + uz * d;
+        segBox(gb, [x - ux * 0.06, z - uz * 0.06], [x + ux * 0.06, z + uz * 0.06], 0, 2.55, 0.12, "#050505");
+      }
+      segBox(gb, a, b, 0.15, 0.06, 0.07, "#0d0d0d");
+      segBox(gb, a, b, 2.25, 0.06, 0.07, "#0d0d0d");
+    }
+    return gb.build();
+  }, [b0.pts, spec.rear]);
+  // Main sign: over the entrance, or centred across the whole front facade at mid-height.
+  const signs = useMemo(() => {
+    const out: { x: number; z: number; yaw: number; w: number; y: number; roof?: boolean }[] = [];
+    if (spec.signAt === "middle") {
+      const xs = b0.pts.map((p) => p[0]);
+      const zs = b0.pts.map((p) => p[1]);
+      const ew = spec.face === "south" || spec.face === "north";
+      const centre = ew ? (Math.min(...xs) + Math.max(...xs)) / 2 : (Math.min(...zs) + Math.max(...zs)) / 2;
+      // the front-facing wall section that spans the facade's centre line
+      let pick = fe;
+      for (let i = 0; i < b0.pts.length; i++) {
+        const e = frontEdge([b0.pts[i], b0.pts[(i + 1) % b0.pts.length], ...b0.pts.slice(i + 2), ...b0.pts.slice(0, i)], spec.face);
+        const lo = Math.min(ew ? e.a[0] : e.a[1], ew ? e.b[0] : e.b[1]);
+        const hi = Math.max(ew ? e.a[0] : e.a[1], ew ? e.b[0] : e.b[1]);
+        if (e.len > 6 && centre >= lo && centre <= hi) pick = e;
+      }
+      const t = ew ? (centre - pick.a[0]) / (pick.b[0] - pick.a[0] || 1) : (centre - pick.a[1]) / (pick.b[1] - pick.a[1] || 1);
+      const px = pick.a[0] + (pick.b[0] - pick.a[0]) * t;
+      const pz = pick.a[1] + (pick.b[1] - pick.a[1]) * t;
+      out.push({ x: px + pick.nx * 0.3, z: pz + pick.nz * 0.3, yaw: Math.atan2(pick.nx, pick.nz), w: Math.min(pick.len * 0.95, 17), y: fullH * 0.55 });
+    } else {
+      out.push({ x: (fe.a[0] + fe.b[0]) / 2 + fe.nx * 0.3, z: (fe.a[1] + fe.b[1]) / 2 + fe.nz * 0.3, yaw: Math.atan2(fe.nx, fe.nz), w: Math.min(fe.len * 0.85, 15), y: fullH - 4.2 });
+    }
+    // bold name standing on the roof edge above any entrance marked with a sign
+    for (const en of spec.extraEntrances ?? []) {
+      if (!en.sign) continue;
+      const e = frontEdge(b0.pts, en.face, en.near);
+      const W = 12;
+      const xs = b0.pts.map((q) => q[0]);
+      const zs = b0.pts.map((q) => q[1]);
+      let x = (e.a[0] + e.b[0]) / 2 - e.nx * 0.9;
+      let z = (e.a[1] + e.b[1]) / 2 - e.nz * 0.9;
+      // keep the whole sign over the roof
+      if (Math.abs(e.nx) > Math.abs(e.nz)) z = Math.min(Math.max(z, Math.min(...zs) + W / 2), Math.max(...zs) - W / 2);
+      else x = Math.min(Math.max(x, Math.min(...xs) + W / 2), Math.max(...xs) - W / 2);
+      out.push({ x, z, yaw: Math.atan2(e.nx, e.nz), w: W, y: fullH + 0.9 + (W * SIGN_ASPECT) / 2, roof: true });
+    }
+    return out;
+  }, [b0.pts, spec, fe, fullH]);
   const showOutside = mode.type !== "cut";
+  // every entrance gets its own canopy and door frame
+  const doors = useMemo(
+    () =>
+      entrancesOf(spec).map((en) => {
+        const e = frontEdge(b0.pts, en.face, en.near);
+        return { x: (e.a[0] + e.b[0]) / 2 + e.nx * 0.3, z: (e.a[1] + e.b[1]) / 2 + e.nz * 0.3, nx: e.nx, nz: e.nz, yaw: Math.atan2(e.nx, e.nz) };
+      }),
+    [b0.pts, spec],
+  );
 
   return (
     <group onClick={(e) => (e.stopPropagation(), onPick())}>
@@ -511,25 +578,51 @@ export function CladBuilding({ info, spec, mode, highlight, onPick, hideLabel = 
       <mesh geometry={parts.panels} castShadow receiveShadow>
         <meshStandardMaterial map={tex.perf} roughness={0.55} metalness={0.08} color="#ffffff" side={THREE.DoubleSide} />
       </mesh>
+      <mesh geometry={fence} castShadow>
+        <meshStandardMaterial vertexColors metalness={0.55} roughness={0.45} />
+      </mesh>
       <mesh geometry={parts.slab} receiveShadow castShadow>
         <meshStandardMaterial roughness={0.9} side={THREE.DoubleSide} />
       </mesh>
       {showOutside && (
         <>
-          <mesh position={[mx, fullH - 4.2, mz]} rotation={[0, yaw, 0]} castShadow>
-            <planeGeometry args={[signW, signW * SIGN_ASPECT]} />
-            <meshStandardMaterial map={tex.sign} roughness={0.5} />
-          </mesh>
-          {/* entrance canopy, door frame and open glass doors */}
-          <mesh position={[mx + fe.nx * 1.5, GROUND_H - 0.15, mz + fe.nz * 1.5]} rotation={[0, yaw, 0]} castShadow>
-            <boxGeometry args={[ENTRANCE_W + 3, 0.25, 3.2]} />
-            <meshStandardMaterial color="#cfd3d6" metalness={0.5} roughness={0.4} />
-          </mesh>
-          {[-1, 1].map((s) => (
-            <mesh key={s} position={[mx - fe.nz * 0 + Math.cos(yaw) * s * (ENTRANCE_W / 2 + 0.1), GROUND_H / 2 - 0.4, mz - Math.sin(yaw) * s * (ENTRANCE_W / 2 + 0.1)]} rotation={[0, yaw, 0]}>
-              <boxGeometry args={[0.25, GROUND_H - 0.8, 0.3]} />
-              <meshStandardMaterial color="#2b2f33" metalness={0.6} roughness={0.3} />
-            </mesh>
+          {signs.map((sg, i) => (
+            <group key={i} position={[sg.x, sg.y, sg.z]} rotation={[0, sg.yaw, 0]}>
+              <mesh castShadow>
+                <planeGeometry args={[sg.w, sg.w * SIGN_ASPECT]} />
+                <meshStandardMaterial map={tex.sign} roughness={0.5} side={sg.roof ? THREE.DoubleSide : THREE.FrontSide} />
+              </mesh>
+              {sg.roof && (
+                <>
+                  {/* black backing box and legs holding the rooftop sign */}
+                  <mesh position={[0, 0, -0.18]} castShadow>
+                    <boxGeometry args={[sg.w + 0.2, sg.w * SIGN_ASPECT + 0.2, 0.3]} />
+                    <meshStandardMaterial color="#0a0a0a" metalness={0.4} roughness={0.5} />
+                  </mesh>
+                  {[-0.4, 0, 0.4].map((k) => (
+                    <mesh key={k} position={[k * sg.w, -(sg.w * SIGN_ASPECT) / 2 - 0.45, -0.18]}>
+                      <boxGeometry args={[0.18, 0.9, 0.18]} />
+                      <meshStandardMaterial color="#0a0a0a" />
+                    </mesh>
+                  ))}
+                </>
+              )}
+            </group>
+          ))}
+          {/* entrance canopies and door frames (open glass doors) */}
+          {doors.map((d, i) => (
+            <group key={i}>
+              <mesh position={[d.x + d.nx * 1.5, GROUND_H - 0.15, d.z + d.nz * 1.5]} rotation={[0, d.yaw, 0]} castShadow>
+                <boxGeometry args={[ENTRANCE_W + 3, 0.25, 3.2]} />
+                <meshStandardMaterial color="#cfd3d6" metalness={0.5} roughness={0.4} />
+              </mesh>
+              {[-1, 1].map((s) => (
+                <mesh key={s} position={[d.x + Math.cos(d.yaw) * s * (ENTRANCE_W / 2 + 0.1), GROUND_H / 2 - 0.4, d.z - Math.sin(d.yaw) * s * (ENTRANCE_W / 2 + 0.1)]} rotation={[0, d.yaw, 0]}>
+                  <boxGeometry args={[0.25, GROUND_H - 0.8, 0.3]} />
+                  <meshStandardMaterial color="#2b2f33" metalness={0.6} roughness={0.3} />
+                </mesh>
+              ))}
+            </group>
           ))}
           {mode.type === "full" &&
             [[-4, 0], [0, 2], [4, -1]].map(([dx, dz], i) =>

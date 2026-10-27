@@ -10,7 +10,16 @@ export const metadata: Metadata = {
   description: "Fly from space to the University of Gold Coast on Spintex Road, Accra, then explore an interactive 3D campus simulation.",
 };
 
-export const viewport: Viewport = { themeColor: "#050505", colorScheme: "dark" };
+export const viewport: Viewport = {
+  themeColor: "#050505",
+  colorScheme: "dark",
+  width: "device-width",
+  initialScale: 1,
+  // pinches drive the 3D views, not the browser's page zoom
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: "cover",
+};
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (

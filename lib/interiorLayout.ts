@@ -1,6 +1,6 @@
 // Room layout inside the clad UGC buildings, shared by the renderer and walk-mode collision.
-import type { Floor, Room } from "./campus";
-import { obb, pointInPoly, type XZ } from "./laneGeometry";
+import type { Entrance, Face, Floor, Room } from "./campus";
+import { distToSeg, obb, pointInPoly, type XZ } from "./laneGeometry";
 
 export type Frame = { cx: number; cz: number; ca: number; sa: number; L: number; W: number; pts: XZ[] };
 
@@ -108,8 +108,8 @@ export function interiorWalls(f: Frame, floor: Floor) {
 }
 
 /** The longest edge facing `face` — used for the entrance and sign. */
-export function frontEdge(pts: XZ[], face: "south" | "north" = "south") {
-  let best = { i: 0, len: 0, a: pts[0], b: pts[1], nx: 0, nz: face === "south" ? 1 : -1 };
+export function frontEdge(pts: XZ[], face: Face = "south", near?: XZ) {
+  let best = { i: 0, len: 0, a: pts[0], b: pts[1], nx: face === "east" ? 1 : face === "west" ? -1 : 0, nz: face === "south" ? 1 : face === "north" ? -1 : 0 };
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i];
     const b = pts[(i + 1) % pts.length];
@@ -120,23 +120,56 @@ export function frontEdge(pts: XZ[], face: "south" | "north" = "south") {
       nx = -nx;
       nz = -nz;
     }
-    const facing = face === "south" ? nz > 0.7 : nz < -0.7;
-    if (facing && len > best.len) best = { i, len, a, b, nx, nz };
+    const facing = face === "south" ? nz > 0.7 : face === "north" ? nz < -0.7 : face === "east" ? nx > 0.7 : nx < -0.7;
+    if (!facing || len < ENTRANCE_W + 1) continue;
+    const better = near
+      ? distToSeg(near[0], near[1], a, b) < (best.len ? distToSeg(near[0], near[1], best.a, best.b) : Infinity)
+      : len > best.len;
+    if (better) best = { i, len, a, b, nx, nz };
   }
   return best;
 }
 
 export const ENTRANCE_W = 3.2;
 
+/**
+ * Line of the palisade fence behind a building: every edge facing `face`, pushed out by `offset` metres
+ * and lengthened at both ends so consecutive runs meet at the corners.
+ */
+export function rearFence(pts: XZ[], face: Face, offset = 1.4): [XZ, XZ][] {
+  const out: [XZ, XZ][] = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len < 1.5) continue;
+    let nx = (b[1] - a[1]) / len;
+    let nz = -(b[0] - a[0]) / len;
+    if (pointInPoly((a[0] + b[0]) / 2 + nx * 0.2, (a[1] + b[1]) / 2 + nz * 0.2, pts)) {
+      nx = -nx;
+      nz = -nz;
+    }
+    const facing = face === "south" ? nz > 0.7 : face === "north" ? nz < -0.7 : face === "east" ? nx > 0.7 : nx < -0.7;
+    if (!facing) continue;
+    const ux = (b[0] - a[0]) / len;
+    const uz = (b[1] - a[1]) / len;
+    out.push([
+      [a[0] + nx * offset - ux * offset, a[1] + nz * offset - uz * offset],
+      [b[0] + nx * offset + ux * offset, b[1] + nz * offset + uz * offset],
+    ]);
+  }
+  return out;
+}
+
 /** Exterior wall segments of a footprint, with an optional entrance opening on the front edge. */
-export function exteriorSegments(pts: XZ[], withEntrance: boolean, face: "south" | "north" = "south") {
-  const fe = withEntrance ? frontEdge(pts, face) : null;
+export function exteriorSegments(pts: XZ[], entrances: Entrance[] = []) {
+  const doorEdges = new Set(entrances.map((e) => frontEdge(pts, e.face, e.near).i));
   const segs: [XZ, XZ][] = [];
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i];
     const b = pts[(i + 1) % pts.length];
-    if (fe && i === fe.i) {
-      const len = fe.len;
+    if (doorEdges.has(i)) {
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
       const t0 = (len / 2 - ENTRANCE_W / 2) / len;
       const t1 = (len / 2 + ENTRANCE_W / 2) / len;
       segs.push([a, [a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0]]);

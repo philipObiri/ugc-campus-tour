@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { TOUR } from "@/lib/tour";
 import { CLAD, FLOOR_H, GROUND_H, WALK_SPAWN, cladById, floorBase, type Room, type SmallBuilding } from "@/lib/campus";
-import { frameOf } from "@/lib/interiorLayout";
+import { frameOf, frontEdge } from "@/lib/interiorLayout";
 import { chime, pop, whoosh } from "@/lib/sfx";
 import { BuildingLabels, Buildings, Highlight, useLaneBuildings } from "./lane/Buildings";
 import { CladBuilding, Forecourt, Interior, type ViewMode } from "./lane/Campus";
@@ -14,6 +14,8 @@ import { Ground, Mast, Poles, RoadSigns, Roads } from "./lane/Streets";
 import Life from "./lane/Life";
 import { WalkController, frontOf, liftTo, type WalkState } from "./lane/Walk";
 import { GuideBrain, setGuideVoice, type GuideSay } from "./lane/Guide";
+import { isTouchDevice } from "@/lib/joystick";
+import Joystick from "./Joystick";
 
 const OVERVIEW: [number, number, number, number, number, number] = [-70, 120, 170, 15, 0, -8];
 const STOP_MS = 9000;
@@ -66,6 +68,45 @@ function Birds({ onPop }: { onPop: (m: string) => void }) {
   );
 }
 
+/**
+ * Keeps the orbit camera above the ground: its focus point is boxed in over the campus, and the camera
+ * itself can never sink below head height (two-finger pans and pinches on phones used to push it under).
+ */
+function GroundGuard({ cc, enabled }: { cc: React.RefObject<CameraControls | null>; enabled: boolean }) {
+  const tmp = useMemo(() => new THREE.Vector3(), []);
+  useEffect(() => {
+    const c = cc.current;
+    if (!c) return;
+    c.setBoundary(new THREE.Box3(new THREE.Vector3(-320, 0, -320), new THREE.Vector3(320, 60, 320)));
+    c.boundaryFriction = 0.2;
+  }, [cc]);
+  useFrame(() => {
+    const c = cc.current;
+    if (!c || !enabled) return;
+    c.getPosition(tmp);
+    if (tmp.y < 1.6) void c.setPosition(tmp.x, 1.6, tmp.z, false);
+    c.getTarget(tmp);
+    if (tmp.y < 0) void c.setTarget(tmp.x, 0, tmp.z, false);
+  });
+  return null;
+}
+
+/** Zooming (or pinching) all the way out and holding there lifts you back to the globe. */
+function SkyExit({ cc, interacting, enabled, onExit }: { cc: React.RefObject<CameraControls | null>; interacting: React.RefObject<boolean>; enabled: boolean; onExit: () => void }) {
+  const held = useRef(0);
+  const done = useRef(false);
+  useFrame((_, dt) => {
+    const c = cc.current;
+    if (!c || !enabled || done.current) return;
+    held.current = interacting.current && c.distance > 680 ? held.current + dt : 0;
+    if (held.current > 0.6) {
+      done.current = true;
+      onExit();
+    }
+  });
+  return null;
+}
+
 function RideCam({ cc, target }: { cc: React.RefObject<CameraControls | null>; target: { pos: THREE.Vector3; yaw: number } | null }) {
   useFrame(() => {
     if (!target || !cc.current) return;
@@ -103,6 +144,8 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
     looking: useRef<HTMLSpanElement>(null),
   };
   const rootRef = useRef<HTMLDivElement>(null);
+  const interacting = useRef(false);
+  const touch = useMemo(() => isTouchDevice(), []);
   const [skyHint, setSkyHint] = useState(false);
   const leaving = useRef(0);
 
@@ -148,7 +191,11 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
   const fly = (cam: [number, number, number], target: [number, number, number], offset = true) => {
     if (!cc.current) return;
     cc.current.smoothTime = 0.9;
-    void cc.current.setLookAt(...cam, ...target, true);
+    // portrait phones see much less sideways: pull the camera back so the subject still fits
+    const aspect = window.innerWidth / window.innerHeight;
+    const k = aspect < 1 ? Math.min(1.9, 0.95 / aspect) : 1;
+    const c: [number, number, number] = [target[0] + (cam[0] - target[0]) * k, target[1] + (cam[1] - target[1]) * k, target[2] + (cam[2] - target[2]) * k];
+    void cc.current.setLookAt(...c, ...target, true);
     void cc.current.setFocalOffset(offset && window.innerWidth > 900 ? 10 : 0, 0, 0, true);
   };
 
@@ -207,8 +254,10 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
     const info = infoOf(id);
     const spec = cladById.get(id)!;
     const h = floorBase(spec.floors.length);
-    const side = spec.face === "north" ? -1 : 1; // view the building from its front
-    fly([info.b.c[0] - 8, h * 0.7, info.b.c[1] + side * (h + 20)], [info.b.c[0], h * 0.45, info.b.c[1]]);
+    // view the building from its front
+    const fe = frontEdge(info.b.pts, spec.face, spec.frontNear);
+    const d = h + 22;
+    fly([info.b.c[0] + fe.nx * d + fe.nz * 6, h * 0.7, info.b.c[1] + fe.nz * d - fe.nx * 6], [info.b.c[0], h * 0.45, info.b.c[1]]);
     pop();
   };
 
@@ -293,7 +342,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
 
   return (
     <div ref={rootRef} className={`absolute inset-0 ${hover != null && !walk ? "cursor-pointer" : ""} ${walk ? "cursor-grab" : ""}`}>
-      <Canvas shadows dpr={[1, 1.75]} camera={{ fov: 45, near: 0.5, far: 3000, position: [15, 650, 2] }}>
+      <Canvas shadows dpr={touch ? [1, 1.35] : [1, 1.75]} camera={{ fov: 45, near: 0.5, far: 3000, position: [15, 650, 2] }}>
         <Sky sunPosition={[140, 70, 60]} turbidity={7} rayleigh={1.5} mieCoefficient={0.006} />
         <fog attach="fog" args={["#d8c9ab", 280, 1000]} />
         <hemisphereLight args={["#fff4dc", "#6b5a3a", 0.75]} />
@@ -302,7 +351,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
           intensity={2.5}
           color="#fff0d0"
           castShadow
-          shadow-mapSize={[4096, 4096]}
+          shadow-mapSize={touch ? [2048, 2048] : [4096, 4096]}
           shadow-camera-left={-220}
           shadow-camera-right={220}
           shadow-camera-top={220}
@@ -337,23 +386,27 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
           minDistance={4}
           maxDistance={700}
           maxPolarAngle={Math.PI / 2.05}
+          onEnd={() => (interacting.current = false)}
           onStart={() => {
+            interacting.current = true;
             if (ride) setRide(null);
           }}
         />
         <RideCam cc={cc} target={ride} />
+        <GroundGuard cc={cc} enabled={!walk} />
+        <SkyExit cc={cc} interacting={interacting} enabled={!walk} onExit={() => (whoosh(1), onBack())} />
         {walk && <WalkController state={walkRef} onEnterExit={(b) => setWalkWhere({ building: b, floor: 0 })} />}
         {walk && <GuideBrain walk={walkRef} hud={guideHud} onSay={(g) => (setSay(g), setGuideOpen(true))} onDone={() => onPop("🎓 Walking tour complete. Keep exploring!")} />}
       </Canvas>
       <div className="landing-fade pointer-events-none absolute inset-0 bg-[#fff4dc]" />
 
-      <header className="absolute inset-x-0 top-0 z-50 flex items-center justify-between gap-3 bg-gradient-to-b from-black/45 to-transparent px-5 py-4 md:px-8">
+      <header className="absolute inset-x-0 top-0 z-50 flex items-center justify-between gap-2 bg-gradient-to-b from-black/55 to-transparent px-3 py-3 sm:gap-3 sm:px-5 sm:py-4 md:px-8">
         <div className="flex items-center gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/brand/ugc-crest.png" alt="UGC crest" className="h-10 w-10 rounded-full ring-1 ring-[#d1aa66]/60" />
           <div className="leading-tight">
-            <p className="text-sm font-semibold tracking-wide text-white">University of Gold Coast</p>
-            <p className="text-[11px] text-white/70">Milton St area, Baatsona · Spintex, Accra</p>
+            <p className="text-xs font-semibold tracking-wide text-white sm:text-sm">University of Gold Coast</p>
+            <p className="hidden text-[11px] text-white/70 sm:block">Milton St area, Baatsona · Spintex, Accra</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -362,8 +415,8 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
             <button className="chip chip-gold" onClick={stopWalk}>✕ Exit walk</button>
           ) : (
             <>
-              <button className="chip" onClick={() => startWalk()}>🚶 Walk in</button>
-              <button className="chip" onClick={explore}>Explore</button>
+              <button className="chip" onClick={() => startWalk()} aria-label="Walk in">🚶<span className="hidden sm:inline"> Walk in</span></button>
+              <button className="chip hidden sm:inline-flex" onClick={explore}>Explore</button>
               <button className="chip chip-gold" onClick={() => (playing ? setPlaying(false) : (setWelcome(false), setPlaying(true)))}>
                 {playing ? "❚❚ Pause" : "▶ Tour"}
               </button>
@@ -389,7 +442,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
 
       {/* guided tour card */}
       {stop && !walk && (
-        <aside key={stop.id} className="panel absolute z-50 right-4 top-24 w-[min(92vw,370px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/80 p-6 text-white backdrop-blur-xl md:right-8">
+        <aside key={stop.id} className="panel sheet absolute z-50 right-4 top-24 w-[min(92vw,370px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/80 p-6 text-white backdrop-blur-xl md:right-8">
           <p className="text-[11px] tracking-[0.25em] text-[#d1aa66]">{stop.kicker.toUpperCase()}</p>
           <h3 className="mt-2 font-display text-2xl leading-tight">{stop.name}</h3>
           <p className="mt-3 text-sm leading-relaxed text-white/80">{stop.blurb}</p>
@@ -414,7 +467,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
 
       {/* clad building card: walk in or pick a floor */}
       {selSpec && !walk && !stop && (
-        <aside key={selSpec.id} className="panel absolute z-50 right-4 top-24 w-[min(92vw,340px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/85 p-6 text-white backdrop-blur-xl md:right-8">
+        <aside key={selSpec.id} className="panel sheet absolute z-50 right-4 top-24 w-[min(92vw,340px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/85 p-6 text-white backdrop-blur-xl md:right-8">
           <p className="text-[11px] tracking-[0.25em] text-[#d1aa66]">{selSpec.key === "main" ? "MAIN CAMPUS" : "CONFERENCE HALL"}</p>
           <h3 className="mt-2 font-display text-2xl leading-tight">{selSpec.title}</h3>
           <button className="chip chip-gold mt-4 w-full" onClick={() => startWalk(frontOf(selSpec.id))}>🚶 Walk in through the entrance</button>
@@ -432,7 +485,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
 
       {/* cutaway floor picker */}
       {cut && cutSpec && !walk && (
-        <aside className="panel absolute z-50 left-4 top-24 w-[min(80vw,270px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/85 p-4 text-white backdrop-blur-xl md:left-8">
+        <aside className="panel sheet floor-picker absolute z-50 left-4 top-24 w-[min(80vw,270px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/85 p-4 text-white backdrop-blur-xl md:left-8">
           <p className="text-[11px] tracking-[0.2em] text-[#d1aa66]">{cutSpec.title.toUpperCase()}</p>
           <div className="mt-2 space-y-1">
             {[...cutSpec.floors].map((fl, i) => ({ fl, i })).reverse().map(({ fl, i }) => (
@@ -462,9 +515,10 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
       {/* walk HUD + lift */}
       {walk && (
         <>
-          <div className="pointer-events-none absolute left-1/2 top-20 z-40 -translate-x-1/2 rounded-full bg-black/45 px-4 py-1.5 text-[11px] text-white/75 backdrop-blur">
+          <div className="walk-hint pointer-events-none absolute left-1/2 top-20 z-40 -translate-x-1/2 rounded-full bg-black/45 px-4 py-1.5 text-[11px] text-white/75 backdrop-blur [@media(pointer:coarse)]:hidden">
             <b className="text-[#d1aa66]">Move the mouse</b> to look · <b className="text-[#d1aa66]">scroll</b> / arrows to walk · <b className="text-[#d1aa66]">click</b> the ground to go there · <b className="text-[#d1aa66]">drag</b> to turn
           </div>
+          {touch && <Joystick />}
           {/* live tour guide */}
           <div className="guide-card absolute bottom-4 left-1/2 z-50 w-[min(94vw,560px)] -translate-x-1/2 rounded-2xl border border-[#d1aa66]/40 bg-[#0a0a0a]/88 p-4 text-white backdrop-blur-xl">
             <div className="flex items-start gap-3">
@@ -507,7 +561,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
             </div>
           </div>
           {walkSpec && (
-            <aside className="panel absolute right-4 top-24 z-50 w-[min(80vw,260px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/85 p-4 text-white backdrop-blur-xl md:right-8">
+            <aside className="panel lift-panel absolute right-4 top-24 z-50 w-[min(80vw,260px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/85 p-4 text-white backdrop-blur-xl md:right-8">
               <p className="text-[11px] tracking-[0.2em] text-[#d1aa66]">🛗 LIFT · {walkSpec.title.toUpperCase()}</p>
               <div className="mt-2 space-y-1">
                 {[...walkSpec.floors].map((fl, i) => ({ fl, i })).reverse().map(({ fl, i }) => (
@@ -524,7 +578,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
       )}
 
       {room && (
-        <div className="panel absolute bottom-24 left-1/2 z-50 w-[min(92vw,380px)] -translate-x-1/2 rounded-2xl border border-white/15 bg-[#0a0a0a]/90 p-4 text-white backdrop-blur-xl">
+        <div className="panel room-panel absolute bottom-24 left-1/2 z-50 w-[min(92vw,380px)] -translate-x-1/2 rounded-2xl border border-white/15 bg-[#0a0a0a]/90 p-4 text-white backdrop-blur-xl">
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-[11px] tracking-[0.2em] text-[#d1aa66]">ROOM</p>
@@ -537,7 +591,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
       )}
 
       {small && !walk && (
-        <aside className="panel absolute right-4 top-24 z-50 w-[min(92vw,320px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/85 p-6 text-white backdrop-blur-xl md:right-8">
+        <aside className="panel sheet absolute right-4 top-24 z-50 w-[min(92vw,320px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/85 p-6 text-white backdrop-blur-xl md:right-8">
           <p className="text-[11px] tracking-[0.25em] text-[#d1aa66]">ON CAMPUS</p>
           <h3 className="mt-2 font-display text-xl">{small.name}</h3>
           <p className="mt-2 text-[13px] text-white/80">{small.note}</p>
@@ -546,7 +600,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
       )}
 
       {pickedInfo && !stop && !walk && (
-        <aside key={pickedInfo.b.id} className="panel absolute z-50 right-4 top-24 w-[min(92vw,340px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/80 p-6 text-white backdrop-blur-xl md:right-8">
+        <aside key={pickedInfo.b.id} className="panel sheet absolute z-50 right-4 top-24 w-[min(92vw,340px)] rounded-3xl border border-white/15 bg-[#0a0a0a]/80 p-6 text-white backdrop-blur-xl md:right-8">
           <p className="text-[11px] tracking-[0.25em] text-[#d1aa66]">BUILDING</p>
           <h3 className="mt-2 font-display text-xl leading-tight">{pickedInfo.b.name ?? "Building on the block"}</h3>
           <ul className="mt-3 space-y-1.5 text-[13px] text-white/85">
@@ -585,7 +639,7 @@ export default function CampusStage({ onBack, onPop }: { onBack: () => void; onP
           ))}
         </nav>
       )}
-      <p className="pointer-events-none absolute bottom-16 right-4 z-40 text-[10px] text-white/60">Buildings & streets © OpenStreetMap contributors · names from Google Maps · interiors illustrative</p>
+      <p className="pointer-events-none absolute bottom-16 right-4 z-40 hidden text-[10px] text-white/60 sm:block">Buildings & streets © OpenStreetMap contributors · names from Google Maps · interiors illustrative</p>
     </div>
   );
 }

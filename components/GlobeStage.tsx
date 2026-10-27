@@ -13,6 +13,7 @@ import {
   makeGlowTexture, makeSiteTexture, vec3ToLatLng,
 } from "@/lib/geo";
 import { chime, whoosh } from "@/lib/sfx";
+import { isTouchDevice } from "@/lib/joystick";
 
 const MAX_Z = 5; // 0..4 = zoom stops, 4..5 = final dive into campus
 const { damp, clamp, lerp, smoothstep } = THREE.MathUtils;
@@ -437,17 +438,50 @@ export default function GlobeStage({ onEnter, onPop, startZ }: { onEnter: () => 
         nav.target = nav.target > 4.35 ? MAX_Z : Math.round(nav.target);
       }, 380);
     };
+    // Track every pointer ourselves: movementX is always 0 for touch, and two fingers = pinch zoom.
+    const pts = new Map<number, { x: number; y: number }>();
+    let pinchD = 0;
+    const onDown = (e: PointerEvent) => {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        pinchD = Math.hypot(a.x - b.x, a.y - b.y);
+        nav.dragging = false;
+      }
+    };
     const onMove = (e: PointerEvent) => {
+      const last = pts.get(e.pointerId);
+      if (!last) return;
+      const dx = e.clientX - last.x;
+      const dy = e.clientY - last.y;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size >= 2) {
+        const [a, b] = [...pts.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        // pinch out = zoom in towards UGC, pinch in = zoom out
+        nav.target = clamp(nav.target + (d - pinchD) * 0.006, 0, MAX_Z);
+        pinchD = d;
+        nav.lastInteract = performance.now();
+        clearTimeout(snapTimer.current);
+        snapTimer.current = setTimeout(() => {
+          nav.target = nav.target > 4.35 ? MAX_Z : Math.round(nav.target);
+        }, 380);
+        return;
+      }
       if (!nav.dragging) return;
-      nav.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
+      nav.moved += Math.abs(dx) + Math.abs(dy);
       const k = 0.12 * Math.max(0.05, 1 - nav.z * 0.6);
-      nav.dragLng = ((nav.dragLng - e.movementX * k + 540) % 360) - 180;
-      nav.dragLat = clamp(nav.dragLat + e.movementY * k, -55, 55);
+      nav.dragLng = ((nav.dragLng - dx * k + 540) % 360) - 180;
+      nav.dragLat = clamp(nav.dragLat + dy * k, -55, 55);
       nav.lastInteract = performance.now();
     };
-    const onUp = () => {
+    const onUp = (e: PointerEvent) => {
+      pts.delete(e.pointerId);
       nav.dragging = false;
     };
+    el.style.touchAction = "none";
+    el.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("pointercancel", onUp);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowDown" || e.key === "+" || e.key === "=") go(Math.floor(nav.target) + 1);
       if (e.key === "ArrowUp" || e.key === "-") go(Math.ceil(nav.target) - 1);
@@ -458,6 +492,8 @@ export default function GlobeStage({ onEnter, onPop, startZ }: { onEnter: () => 
     window.addEventListener("keydown", onKey);
     return () => {
       el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("pointercancel", onUp);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("keydown", onKey);
@@ -482,7 +518,7 @@ export default function GlobeStage({ onEnter, onPop, startZ }: { onEnter: () => 
   return (
     <div ref={wrap} className={`absolute inset-0 select-none ${hover ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"}`}>
       <Canvas
-        dpr={[1, 2]}
+        dpr={isTouchDevice() ? [1, 1.5] : [1, 2]}
         gl={{ antialias: true, logarithmicDepthBuffer: true }}
         camera={{ fov: 45, near: 0.001, far: 100, position: [3, 0, 3] }}
       >
@@ -519,8 +555,11 @@ export default function GlobeStage({ onEnter, onPop, startZ }: { onEnter: () => 
       )}
 
       <div className="absolute bottom-0 inset-x-0 flex flex-col items-center justify-between gap-2 px-6 pb-5 md:flex-row md:pr-20">
-        <p className="text-xs text-white/50">Scroll to zoom · Drag to spin · Hover &amp; click countries and labels</p>
-        <div ref={hud.readout} className="font-mono text-[11px] tracking-wider text-[#e3c690]/80" />
+        <p className="text-center text-xs text-white/50">
+          <span className="[@media(pointer:coarse)]:hidden">Scroll to zoom · Drag to spin · Hover &amp; click countries and labels</span>
+          <span className="hidden [@media(pointer:coarse)]:inline">Pinch to zoom · Swipe to spin · Tap countries and labels</span>
+        </p>
+        <div ref={hud.readout} className="hidden font-mono text-[11px] tracking-wider text-[#e3c690]/80 sm:block" />
       </div>
 
       <div className="absolute right-5 top-1/2 flex -translate-y-1/2 flex-col gap-2">
